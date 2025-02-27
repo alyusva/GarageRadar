@@ -1,52 +1,56 @@
-import os
-import logging
-from dotenv import load_dotenv
-from apscheduler.schedulers.blocking import BlockingScheduler
-from src.scrapers.idealista_scraper import scrape_idealista
-from src.database.db_handler import Database
-from src.notifications.email_handler import send_email_notification
+# main.py
+from garajes import config, db, scraper, notifier, utils
 
-# Configuración inicial
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
+def filtrar_anuncios(anuncios, center_coords):
+    """
+    Filtra los anuncios según criterios de precio, área y radio.
+    En este ejemplo, para la distancia se utiliza la misma dirección central
+    para simular la comprobación, ya que extraer la ubicación exacta puede
+    requerir más información del anuncio.
+    """
+    resultados = []
+    for ad in anuncios:
+        if ad["precio"] <= config.PRECIO_MAXIMO and ad["area"] >= config.AREA_MINIMA:
+            # Simulación: se usa la misma dirección para calcular la distancia
+            # En un caso real, deberías extraer la dirección del anuncio y geolocalizarla
+            ad_coords = utils.get_center_coordinates(config.CENTRO_DIRECCION)
+            # Se calcula la distancia entre el centro y la ubicación del anuncio
+            from geopy.distance import distance
+            dist = distance(center_coords, ad_coords).km
+            if dist <= config.RADIO_KM:
+                resultados.append(ad)
+    return resultados
 
-class GarageRadar:
-    def __init__(self):
-        self.db = Database()
-        self.configured_scrapers = [scrape_idealista]
-        
-    def run_scraping_job(self):
-        try:
-            logging.info("Iniciando proceso de scraping...")
-            all_results = []
-            
-            for scraper in self.configured_scrapers:
-                try:
-                    results = scraper()
-                    all_results.extend(results)
-                except Exception as e:
-                    logging.error(f"Error en {scraper.__name__}: {str(e)}")
-            
-            new_garages = self.db.filter_new_entries(all_results)
-            
-            if new_garages:
-                send_email_notification(new_garages)
-                self.db.save_entries(new_garages)
-                logging.info(f"{len(new_garages)} nuevos garajes encontrados")
-            else:
-                logging.info("No se encontraron nuevos garajes")
-                
-        except Exception as e:
-            logging.critical(f"Error crítico: {str(e)}")
+def main():
+    print("Iniciando scraper de garajes...")
+    # Inicializar la base de datos
+    db.init_db()
+    
+    # Obtener las coordenadas del centro de búsqueda
+    center_coords = utils.get_center_coordinates(config.CENTRO_DIRECCION)
+    
+    # Realizar el scraping (por ejemplo, de Idealista)
+    anuncios = scraper.scrape_idealista()
+    print(f"Se han obtenido {len(anuncios)} anuncios.")
+    
+    # Filtrar según criterios de precio, área y distancia
+    anuncios_filtrados = filtrar_anuncios(anuncios, center_coords)
+    print(f"{len(anuncios_filtrados)} anuncios cumplen los criterios.")
+    
+    # Almacenar anuncios nuevos en la base de datos y recopilar los que sean nuevos
+    nuevos = []
+    for ad in anuncios_filtrados:
+        if db.almacenar_anuncio(ad):
+            nuevos.append(ad)
+    
+    print(f"{len(nuevos)} anuncios son nuevos.")
+    
+    # Enviar notificaciones si hay anuncios nuevos
+    if nuevos:
+        notifier.enviar_email(nuevos)
+        notifier.enviar_whatsapp(nuevos)
+    else:
+        print("No hay anuncios nuevos.")
 
 if __name__ == "__main__":
-    radar = GarageRadar()
-    scheduler = BlockingScheduler()
-    
-    # Programa cada 6 horas (ajustable)
-    scheduler.add_job(radar.run_scraping_job, 'interval', hours=6)
-    
-    try:
-        scheduler.start()
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    main()
